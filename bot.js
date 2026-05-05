@@ -5,7 +5,16 @@ const client = new Client({
 });
 
 client.once('ready', () => {
-  console.log("Bot en ligne !");
+  console.log(`Bot connecté : ${client.user.tag}`);
+  console.log("TOKEN =", process.env.DISCORD_TOKEN);
 });
 
-console.log("TOKEN =", process.env.DISCORD_TOKEN);
+client.on('messageCreate', (message) => {
+  if (message.author.bot) return;
+
+  if (message.content === "!ping") {
+    message.reply("Pong 🏓");
+  }
+});
+
+client.login(process.env.DISCORD_TOKEN);
