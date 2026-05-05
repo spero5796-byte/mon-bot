@@ -8,4 +8,4 @@ client.once('ready', () => {
   console.log("Bot en ligne !");
 });
 
-client.login(process.env.DISCORD_TOKEN);
+console.log("TOKEN =", process.env.DISCORD_TOKEN);
