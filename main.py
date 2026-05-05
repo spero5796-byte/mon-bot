@@ -1,62 +1,61 @@
 import discord
-from discord.ext import commands
 import os
 from openai import OpenAI
-from config import TOKEN, OPENAI_API_KEY, LOG_CHANNEL_ID, WARN_LIMIT
 
-client_ai = OpenAI(api_key=OPENAI_API_KEY)
+TOKEN = os.getenv("DISCORD_TOKEN")
+client_ai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = discord.Client(intents=intents)
 
-warns = {}
-
-def check_ai(text):
+# 🧠 IA CHECK
+def is_toxic(text):
     try:
-        r = client_ai.chat.completions.create(
+        response = client_ai.chat.completions.create(
             model="gpt-4.1-mini",
             messages=[{
                 "role": "user",
-                "content": f"Répond OK ou BAD. BAD = insultes, toxicité, spam : {text}"
+                "content": f"""
+Analyse ce message Discord.
+
+Répond seulement :
+YES ou NO
+
+YES = insultes, haine, sexualité choquante, harcèlement, spam
+NO = normal
+
+Message: {text}
+"""
             }]
         )
-        return "BAD" in r.choices[0].message.content
+
+        result = response.choices[0].message.content.strip()
+        return result == "YES"
+
     except:
         return False
 
-async def log(guild, msg):
-    ch = guild.get_channel(LOG_CHANNEL_ID)
-    if ch:
-        await ch.send(msg)
-
+# 🚨 MODERATION
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
-    uid = message.author.id
-
-    if check_ai(message.content):
+    if is_toxic(message.content):
         await message.delete()
-
-        warns[uid] = warns.get(uid, 0) + 1
-
         await message.channel.send(
-            f"⚠️ {message.author.mention} warn IA ({warns[uid]}/{WARN_LIMIT})"
+            f"⚠️ {message.author.mention} message supprimé par IA"
         )
+        return
 
-        await log(message.guild, f"Toxicité détectée: {message.author}")
+    if message.content == "!ping":
+        await message.channel.send("pong")
 
-        if warns[uid] >= WARN_LIMIT:
-            try:
-                await message.author.kick(reason="IA modération")
-                await log(message.guild, f"Kick auto: {message.author}")
-            except:
-                pass
-
-    await bot.process_commands(message)
+# 🔵 READY
+@bot.event
+async def on_ready():
+    print(f"Bot IA connecté : {bot.user}")
 
 bot.run(TOKEN)
