@@ -1,123 +1,143 @@
-const { 
-  Client, 
-  GatewayIntentBits, 
-  PermissionFlagsBits 
-} = require('discord.js');
+const { Client, GatewayIntentBits } = require("discord.js");
+const sqlite3 = require("sqlite3").verbose();
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers
   ]
 });
 
-// 📌 ID salon logs
+const TOKEN = process.env.DISCORD_TOKEN;
 const LOG_CHANNEL_ID = "1501172466251468812";
 
-// 📊 warns en mémoire
-const warns = new Map();
+// 🚨 mots interdits
+const badWords = [
+  "pute", "fdp", "connard", "connasse", "enculé",
+  "salope", "ntm", "nique", "porn", "xxx", "sex"
+];
 
-// 🔧 fonction logs
+// 📦 DB
+const db = new sqlite3.Database("./warns.db");
+
+db.run(`
+CREATE TABLE IF NOT EXISTS warns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  userId TEXT,
+  guildId TEXT,
+  reason TEXT
+)
+`);
+
+// 📌 LOGS
 function log(guild, text) {
   const channel = guild.channels.cache.get(LOG_CHANNEL_ID);
   if (channel) channel.send(text);
 }
 
-client.once('ready', () => {
-  console.log(`🤖 Bot connecté : ${client.user.tag}`);
-});
+// 🚨 ANTI SPAM
+const spamMap = new Map();
 
-client.on('messageCreate', async (message) => {
+client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
 
-  const args = message.content.split(" ");
-  const command = args[0].toLowerCase();
+  const userId = message.author.id;
+  const now = Date.now();
 
-  // 🔨 BAN
-  if (command === "!ban") {
-    if (!message.member.permissions.has(PermissionFlagsBits.BanMembers))
-      return message.reply("❌ Pas la permission.");
-
-    const user = message.mentions.members.first();
-    const reason = args.slice(2).join(" ") || "Aucune raison";
-
-    if (!user) return message.reply("❌ Mentionne un utilisateur.");
-
-    await user.ban({ reason });
-
-    message.reply(`🔨 ${user.user.tag} banni`);
-
-    log(message.guild,
-      `🔨 BAN\nUser: ${user.user.tag}\nMod: ${message.author.tag}\nRaison: ${reason}`
-    );
+  // spam detection
+  if (!spamMap.has(userId)) {
+    spamMap.set(userId, []);
   }
 
-  // 👢 KICK
-  if (command === "!kick") {
-    if (!message.member.permissions.has(PermissionFlagsBits.KickMembers))
-      return message.reply("❌ Pas la permission.");
+  const timestamps = spamMap.get(userId);
+  timestamps.push(now);
 
-    const user = message.mentions.members.first();
-    const reason = args.slice(2).join(" ") || "Aucune raison";
+  const recent = timestamps.filter(t => now - t < 5000);
+  spamMap.set(userId, recent);
 
-    if (!user) return message.reply("❌ Mentionne un utilisateur.");
-
-    await user.kick(reason);
-
-    message.reply(`👢 ${user.user.tag} kick`);
-
-    log(message.guild,
-      `👢 KICK\nUser: ${user.user.tag}\nMod: ${message.author.tag}\nRaison: ${reason}`
-    );
+  if (recent.length > 5) {
+    await message.delete();
+    return message.channel.send(`⚠️ ${message.author} anti-spam activé`);
   }
 
-  // ⚠️ WARN
-  if (command === "!warn") {
-    const user = message.mentions.users.first();
-    const reason = args.slice(2).join(" ") || "Aucune raison";
+  // 🚨 bad words
+  const content = message.content.toLowerCase();
+  const bad = badWords.find(w => content.includes(w));
 
-    if (!user) return message.reply("❌ Mentionne un utilisateur.");
+  if (!bad) return;
 
-    if (!warns.has(user.id)) warns.set(user.id, []);
-    warns.get(user.id).push(reason);
+  await message.delete();
 
-    message.reply(`⚠️ Warn donné à ${user.username}`);
+  db.run(
+    `INSERT INTO warns (userId, guildId, reason)
+     VALUES (?, ?, ?)`,
+    [message.author.id, message.guild.id, bad]
+  );
 
-    log(message.guild,
-      `⚠️ WARN\nUser: ${user.username}\nMod: ${message.author.tag}\nRaison: ${reason}`
-    );
+  db.all(
+    `SELECT * FROM warns WHERE userId = ? AND guildId = ?`,
+    [message.author.id, message.guild.id],
+    async (err, rows) => {
 
-    // auto ban 3 warns
-    if (warns.get(user.id).length >= 3) {
-      const member = message.guild.members.cache.get(user.id);
-      if (member) await member.ban({ reason: "3 warns atteints" });
+      const count = rows.length;
+      const member = await message.guild.members.fetch(message.author.id);
 
-      log(message.guild,
-        `🚨 AUTO-BAN\nUser: ${user.username}\nRaison: 3 warns`
-      );
+      if (count === 1) {
+        message.channel.send(`⚠️ ${message.author} avertissement`);
+
+      } else if (count === 2) {
+        await member.timeout(10 * 60 * 1000);
+        message.channel.send(`🔇 mute 10 min`);
+
+      } else if (count === 3) {
+        await member.kick("3 warns");
+        message.channel.send(`👢 kick`);
+
+      } else if (count >= 4) {
+        await member.ban({ reason: "4 warns" });
+        message.channel.send(`🔨 ban`);
+      }
+
+      log(message.guild, `🚨 MODERATION\nUser: ${message.author.tag}\nMot: ${bad}`);
     }
+  );
+});
+
+// 🛡️ ANTI RAID (joins massifs)
+const joinMap = new Map();
+
+client.on("guildMemberAdd", async (member) => {
+  const guild = member.guild;
+  const now = Date.now();
+
+  if (!joinMap.has(guild.id)) {
+    joinMap.set(guild.id, []);
   }
 
-  // 🔇 MUTE (timeout)
-  if (command === "!mute") {
-    if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers))
-      return message.reply("❌ Pas la permission.");
+  const joins = joinMap.get(guild.id);
+  joins.push(now);
 
-    const user = message.mentions.members.first();
-    const time = parseInt(args[2]) || 10;
+  const recent = joins.filter(t => now - t < 10000);
+  joinMap.set(guild.id, recent);
 
-    if (!user) return message.reply("❌ Mentionne un utilisateur.");
+  if (recent.length > 5) {
+    log(guild, "🚨 RAID DETECTÉ - activation protection");
 
-    await user.timeout(time * 60 * 1000);
-
-    message.reply(`🔇 ${user.user.tag} mute ${time} min`);
-
-    log(message.guild,
-      `🔇 MUTE\nUser: ${user.user.tag}\nMod: ${message.author.tag}\nDurée: ${time} min`
-    );
+    guild.members.cache.forEach(async (m) => {
+      if (!m.user.bot) {
+        try {
+          await m.timeout(10 * 60 * 1000);
+        } catch {}
+      }
+    });
   }
 });
 
-client.login(process.env.DISCORD_TOKEN);
+// 🤖 READY
+client.once("ready", () => {
+  console.log(`🤖 Bot anti-raid en ligne : ${client.user.tag}`);
+});
+
+client.login(TOKEN);
